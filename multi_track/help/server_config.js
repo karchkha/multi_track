@@ -71,21 +71,21 @@ function bang() {
         }
     } else { // remote
         if (os === 'mac') {
-            cmd = 'ssh -t -R ' + clientport + ':localhost:' + clientport + ' ' + host
+            cmd = 'ssh -t -R ' + clientport + ':127.0.0.1:' + clientport + ' -L ' + serverport + ':localhost:' + serverport + ' ' + host
                 + " \"bash -ic 'cd " + dir
                 + ' && export CUDA_VISIBLE_DEVICES=' + cuda_val
                 + ' && conda run --no-capture-output -n ' + conda_env + ' python'
                 + ' ' + script
                 + ' --serverport ' + serverport
-                + " --clientport " + clientport + "'\"";
+                + " --clientport " + clientport + " --client_ip 127.0.0.1'\"";
         } else { // windows
-            cmd = 'ssh -t -R ' + clientport + ':localhost:' + clientport + ' ' + host
+            cmd = 'ssh -t -R ' + clientport + ':127.0.0.1:' + clientport + ' -L ' + serverport + ':localhost:' + serverport + ' ' + host
                 + " \"bash -ic 'cd " + dir
                 + ' && export CUDA_VISIBLE_DEVICES=' + cuda_val
                 + ' && conda run --no-capture-output -n ' + conda_env + ' python'
                 + ' ' + script
                 + ' --serverport ' + serverport
-                + " --clientport " + clientport + "'\"";
+                + " --clientport " + clientport + " --client_ip 127.0.0.1'\"";
         }
     }
     outlet(0, cmd);

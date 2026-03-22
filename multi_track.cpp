@@ -54,7 +54,6 @@
 #endif
 
 #include "osc/OscOutboundPacketStream.h"
-#include "ip/UdpSocket.h"
 #include <ip/IpEndpointName.h>
 #include "osc/OscReceivedElements.h"
 #include "osc/OscPacketListener.h"
@@ -70,6 +69,47 @@
 #define OUTPUT_BUFFER_SIZE 65536 /* maximum buffer size for osc send */
 #define MAX_OSC_PACKET_SIZE 65535  // Maximum UDP packet size allowed
 //#define NUM_SAMPLES 163840
+
+// TCP replacement for TcpTransmitSocket — same interface, sends OSC over TCP with 4-byte length prefix
+class TcpTransmitSocket {
+	char ip[64];
+	int port;
+public:
+	TcpTransmitSocket(IpEndpointName endpoint) {
+		endpoint.AddressAsString(ip);
+		port = endpoint.port;
+	}
+	void Send(const char* data, int size) {
+#ifdef _WIN32
+		SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (sock == INVALID_SOCKET) { post("TCP send: socket failed"); return; }
+#else
+		int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (sock < 0) { post("TCP send: socket failed"); return; }
+#endif
+		sockaddr_in addr = {};
+		addr.sin_family = AF_INET;
+		addr.sin_port = htons(port);
+		inet_pton(AF_INET, ip, &addr.sin_addr);
+		if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+			post("TCP send: connect failed to %s:%d", ip, port);
+#ifdef _WIN32
+			closesocket(sock);
+#else
+			close(sock);
+#endif
+			return;
+		}
+		uint32_t len_net = htonl((uint32_t)size);
+		::send(sock, (const char*)&len_net, 4, 0);
+		::send(sock, data, size, 0);
+#ifdef _WIN32
+		closesocket(sock);
+#else
+		close(sock);
+#endif
+	}
+};
 
 /* This following class is for controling threading and data flow to and from the python server */
 /* we have this class because this is much more convinient to call its instances and call its functions this way */
@@ -545,7 +585,7 @@ void multi_track_set_packet_size(t_multi_track* x, long new_size) {
 	post("Packet size set to %d", x->package_size);
 
 	// Send updated package size (chunk size) to Python
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
@@ -568,7 +608,7 @@ void multi_track_set_percentage(t_multi_track* x, double new_percentage) {
 	post("Percentage set to %f", x->percentage);
 
 	// Send updated percentage to Python server
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
@@ -592,7 +632,7 @@ void multi_track_set_pr_win_mul(t_multi_track* x, double new_pr_win_mul) {
 	post("Percentage set to %f", x->pr_win_mul);
 
 	// Send updated percentage to Python server
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
@@ -612,7 +652,7 @@ void multi_track_test_packet(t_multi_track* x) {
 		post("Starting packet test with size %d (floats)", x->package_size);
 	}
 
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 	char osc_buffer[OUTPUT_BUFFER_SIZE];
 
 	// High-resolution timers
@@ -721,7 +761,7 @@ void multi_track_set_read_instruments(t_multi_track* x, t_symbol* s, long argc, 
 void multi_track_send_predict_instruments(t_multi_track* x) {
 
 	// Send updated selection to Python server
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
 
@@ -738,7 +778,7 @@ void multi_track_send_predict_instruments(t_multi_track* x) {
 
 
 void multi_track_send_print(t_multi_track* x) {
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
@@ -750,7 +790,7 @@ void multi_track_send_print(t_multi_track* x) {
 }
 
 void multi_track_send_reset(t_multi_track* x) {
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
@@ -812,6 +852,10 @@ void multi_track_set_command(t_multi_track* x, t_symbol* s, long argc, t_atom* a
 				strncpy(x->server_ip, hostname, sizeof(x->server_ip) - 1);
 			x->server_ip[sizeof(x->server_ip) - 1] = '\0';
 		}
+	}
+	else if (strstr(x->command_str, " -L ")) {
+		// -L tunnel present: Max connects to localhost, keep 127.0.0.1
+		post("TCP tunnel detected (-L), using server_ip=127.0.0.1");
 	}
 	else if (char* ssh = strstr(x->command_str, "ssh ")) {
 		// no --server_ip: try to extract hostname from ssh user@host
@@ -1357,7 +1401,7 @@ void timestamp()     /*********this is used to track timing of data flow *****/
 /* function for data sending */
 
 void send_matrix_plane(char* matrix_data, int plane, long dim0, long dim1, long dimstride0, long dimstride1, const char* address, int port, const char* tag, long package_size) {
-	UdpTransmitSocket transmitSocket(IpEndpointName(address, port));
+	TcpTransmitSocket transmitSocket(IpEndpointName(address, port));
 	char osc_buffer[OUTPUT_BUFFER_SIZE];
 
 	// Divide the plane into chunks
@@ -1397,7 +1441,7 @@ void send_matrix_plane(char* matrix_data, int plane, long dim0, long dim1, long 
 void multi_track_OSC_load_model(t_multi_track* x)
 {
 
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[4096];
 
@@ -1415,7 +1459,7 @@ void multi_track_OSC_time_to_predict_sender(t_multi_track* x)
 {
 	int one = 1;
 
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 	
 	char buffer[32];
 
@@ -1432,7 +1476,7 @@ void send_acknowledgment(t_multi_track* x) {
 	// Send the acknowledgment message to the Python server
 	int one = 1;
 
-	UdpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 
 	char buffer[32];
 
@@ -1697,98 +1741,114 @@ public:
 
 };
 
-class CustomUdpListener {
+class CustomTcpListener {
 private:
 #ifdef _WIN32
-	SOCKET sock_fd;
+	SOCKET server_fd;
 #else
-	int sock_fd;
+	int server_fd;
 #endif
 	char buffer[MAX_OSC_PACKET_SIZE];
 	osc::OscPacketListener* packetListener;
-	sockaddr_in serverAddr;
 
 public:
-	CustomUdpListener(int port, osc::OscPacketListener* listener)
+	CustomTcpListener(int port, osc::OscPacketListener* listener)
 		: packetListener(listener) {
 
 #ifdef _WIN32
 		WSADATA wsaData;
 		if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
 			throw std::runtime_error("WSAStartup failed");
+		server_fd = INVALID_SOCKET;
 #endif
 
-		sock_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+		server_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 
 #ifdef _WIN32
-		if (sock_fd == INVALID_SOCKET) {
-			WSACleanup();
-			throw std::runtime_error("Socket creation failed");
-		}
+		if (server_fd == INVALID_SOCKET) { WSACleanup(); throw std::runtime_error("Socket creation failed"); }
 #else
-		if (sock_fd < 0)
-			throw std::runtime_error("Socket creation failed");
+		if (server_fd < 0) throw std::runtime_error("Socket creation failed");
 #endif
 
-		int buffer_size = MAX_OSC_PACKET_SIZE;
+		int reuse = 1;
 #ifdef _WIN32
-		if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, (const char*)&buffer_size, sizeof(buffer_size)) == SOCKET_ERROR) {
-			closesocket(sock_fd);
-			WSACleanup();
-			throw std::runtime_error("Failed to set socket buffer size");
-		}
+		setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&reuse, sizeof(reuse));
 #else
-		if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &buffer_size, sizeof(buffer_size)) < 0) {
-			close(sock_fd);
-			throw std::runtime_error("Failed to set socket buffer size");
-		}
+		setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 #endif
 
-		memset(&serverAddr, 0, sizeof(serverAddr));
-		serverAddr.sin_family = AF_INET;
-		serverAddr.sin_addr.s_addr = INADDR_ANY;
-		serverAddr.sin_port = htons(port);
+		sockaddr_in addr = {};
+		addr.sin_family = AF_INET;
+		addr.sin_addr.s_addr = INADDR_ANY;
+		addr.sin_port = htons(port);
 
 #ifdef _WIN32
-		if (bind(sock_fd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-			closesocket(sock_fd);
-			WSACleanup();
-			throw std::runtime_error("Failed to bind socket");
-		}
+		if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) { closesocket(server_fd); WSACleanup(); throw std::runtime_error("Bind failed"); }
+		if (listen(server_fd, 5) == SOCKET_ERROR) { closesocket(server_fd); WSACleanup(); throw std::runtime_error("Listen failed"); }
 #else
-		if (bind(sock_fd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-			close(sock_fd);
-			throw std::runtime_error("Failed to bind socket");
-		}
+		if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { close(server_fd); throw std::runtime_error("Bind failed"); }
+		if (listen(server_fd, 5) < 0) { close(server_fd); throw std::runtime_error("Listen failed"); }
 #endif
+		char bound_ip[INET_ADDRSTRLEN];
+		inet_ntop(AF_INET, &addr.sin_addr, bound_ip, sizeof(bound_ip));
+		post("TCP listener initialized on %s:%d", bound_ip, port);
 	}
 
-	~CustomUdpListener() {
+	~CustomTcpListener() {
 #ifdef _WIN32
-		closesocket(sock_fd);
+		closesocket(server_fd);
 		WSACleanup();
 #else
-		close(sock_fd);
+		close(server_fd);
 #endif
 	}
 
 	void run() {
+		post("TCP listener waiting for connections");
 		while (true) {
-			sockaddr_in clientAddr;
+			sockaddr_in clientAddr = {};
 #ifdef _WIN32
 			int clientAddrLen = sizeof(clientAddr);
+			SOCKET client_fd = accept(server_fd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+			if (client_fd == INVALID_SOCKET) continue;
 #else
 			socklen_t clientAddrLen = sizeof(clientAddr);
+			int client_fd = accept(server_fd, (struct sockaddr*)&clientAddr, &clientAddrLen);
+			if (client_fd < 0) continue;
 #endif
-			int receivedBytes = recvfrom(sock_fd, buffer, MAX_OSC_PACKET_SIZE, 0, (struct sockaddr*)&clientAddr, &clientAddrLen);
-			if (receivedBytes > 0) {
-				try {
-					packetListener->ProcessPacket(buffer, receivedBytes, IpEndpointName(clientAddr.sin_addr.s_addr, ntohs(clientAddr.sin_port)));
+			post("TCP listener: connection accepted");
+			// Read multiple messages from this connection until it closes
+			while (true) {
+				uint32_t len_net = 0;
+				int received = 0;
+				while (received < 4) {
+					int r = recv(client_fd, ((char*)&len_net) + received, 4 - received, 0);
+					if (r <= 0) goto close_client;
+					received += r;
 				}
-				catch (const osc::Exception& e) {
-					std::cerr << "Error processing OSC packet: " << e.what() << std::endl;
+				{
+					uint32_t len = ntohl(len_net);
+					if (len == 0 || len > MAX_OSC_PACKET_SIZE) goto close_client;
+					received = 0;
+					while ((uint32_t)received < len) {
+						int r = recv(client_fd, buffer + received, (int)(len - received), 0);
+						if (r <= 0) goto close_client;
+						received += r;
+					}
+					try {
+						packetListener->ProcessPacket(buffer, received, IpEndpointName(clientAddr.sin_addr.s_addr, ntohs(clientAddr.sin_port)));
+					}
+					catch (const osc::Exception& e) {
+						std::cerr << "Error processing OSC packet: " << e.what() << std::endl;
+					}
 				}
 			}
+			close_client:
+#ifdef _WIN32
+			closesocket(client_fd);
+#else
+			close(client_fd);
+#endif
 		}
 	}
 };
@@ -1841,10 +1901,10 @@ void* multi_track_OSC_listener(t_multi_track* x, int argc, char* argv[]) {
 		listener.python_import_control = x->python_import_control;
 
 		// Create and configure the custom listener
-		CustomUdpListener udpListener(x->PORT_LISTENER, &listener);
+		CustomTcpListener tcpListener(x->PORT_LISTENER, &listener);
 
 		// Start listening for OSC messages
-		udpListener.run();
+		tcpListener.run();
 	}
 	catch (const std::exception& e) {
 		post("Error starting OSC listener: %s", e.what());
