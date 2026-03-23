@@ -27,6 +27,7 @@
 #include <mutex>
 #include <stdio.h>		/* for dumpping memroy to file */
 #include <thread>
+#include <vector>
 #include <chrono> // For optional delays
 
 #ifdef _WIN32
@@ -70,45 +71,61 @@
 #define MAX_OSC_PACKET_SIZE 65535  // Maximum UDP packet size allowed
 //#define NUM_SAMPLES 163840
 
-// TCP replacement for TcpTransmitSocket — same interface, sends OSC over TCP with 4-byte length prefix
+// Persistent TCP socket — connects once, reuses the connection for all sends.
 class TcpTransmitSocket {
+#ifdef _WIN32
+	SOCKET sock;
+#else
+	int sock;
+#endif
+	bool connected;
 	char ip[64];
 	int port;
 public:
-	TcpTransmitSocket(IpEndpointName endpoint) {
+	TcpTransmitSocket(IpEndpointName endpoint) : connected(false) {
 		endpoint.AddressAsString(ip);
 		port = endpoint.port;
-	}
-	void Send(const char* data, int size) {
 #ifdef _WIN32
-		SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		if (sock == INVALID_SOCKET) { post("TCP send: socket failed"); return; }
+		sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (sock == INVALID_SOCKET) { post("TCP: socket failed"); return; }
 #else
-		int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-		if (sock < 0) { post("TCP send: socket failed"); return; }
+		sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+		if (sock < 0) { post("TCP: socket failed"); return; }
 #endif
+		int flag = 1;
+		setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag));
 		sockaddr_in addr = {};
 		addr.sin_family = AF_INET;
 		addr.sin_port = htons(port);
 		inet_pton(AF_INET, ip, &addr.sin_addr);
 		if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-			post("TCP send: connect failed to %s:%d", ip, port);
+			post("TCP: connect failed to %s:%d", ip, port);
+#ifdef _WIN32
+			closesocket(sock); sock = INVALID_SOCKET;
+#else
+			close(sock); sock = -1;
+#endif
+			return;
+		}
+		connected = true;
+	}
+	~TcpTransmitSocket() {
+		if (connected) {
 #ifdef _WIN32
 			closesocket(sock);
 #else
 			close(sock);
 #endif
-			return;
 		}
-		uint32_t len_net = htonl((uint32_t)size);
-		::send(sock, (const char*)&len_net, 4, 0);
-		::send(sock, data, size, 0);
-#ifdef _WIN32
-		closesocket(sock);
-#else
-		close(sock);
-#endif
 	}
+	void Send(const char* data, int size) {
+		if (!connected) return;
+		uint32_t len_net = htonl((uint32_t)size);
+		int r1 = ::send(sock, (const char*)&len_net, 4, 0);
+		int r2 = ::send(sock, data, size, 0);
+		if (r1 < 0 || r2 < 0) { connected = false; }
+	}
+	bool is_connected() const { return connected; }
 };
 
 /* This following class is for controling threading and data flow to and from the python server */
@@ -212,6 +229,16 @@ typedef struct _multi_track {
 
 	bool auto_load_model_on_ready;  // Flag to auto-load model when server is ready
 
+	// One persistent connection per plane (slot = plane index 0-3).
+	// Each plane thread has exclusive access to its own slot — no send-time locking needed.
+	// After the first prediction TCP's congestion window is warmed up, so transfers are fast.
+	TcpTransmitSocket* conn_pool[4];
+	std::mutex* conn_pool_mutex;
+
+	// Persistent connection for control messages (test_packet, load_model, etc.)
+	TcpTransmitSocket* control_conn;
+	std::mutex* control_conn_mutex;
+
 } t_multi_track;
 
 
@@ -234,8 +261,11 @@ void		multi_track_OSC_time_to_predict_sender(t_multi_track* x);
 void		multi_track_OSC_load_model(t_multi_track* x);
 void		send_acknowledgment(t_multi_track* x);
 
+// Helper: send a control OSC message via the shared persistent control connection
+static void send_control(t_multi_track* x, const char* data, int size);
+
 // data sending
-void		send_matrix_plane(char* matrix_data, int plane, long dim0, long dim1, long dimstride0, long dimstride1, const char* address, int port, const char* tag, long package_size);
+void		send_matrix_plane(t_multi_track* x, char* matrix_data, int plane, long dim0, long dim1, long dimstride0, long dimstride1, const char* tag, long package_size, int total_expected_chunks);
 
 void		* multi_track_OSC_listener(t_multi_track* x, int argc, char* argv[]);
 void		multi_track_OSC_listen_thread(t_multi_track* x);
@@ -384,6 +414,11 @@ t_multi_track* multi_track_new(t_symbol* s, long argc, t_atom* argv)
 
 		x->auto_load_model_on_ready = false;  // Initialize auto-load flag
 
+		for (int i = 0; i < 4; i++) x->conn_pool[i] = nullptr;
+		x->conn_pool_mutex = new std::mutex();
+		x->control_conn = nullptr;
+		x->control_conn_mutex = new std::mutex();
+
 	}
 	return x;
 
@@ -445,6 +480,11 @@ void multi_track_free(t_multi_track* x) {
 	delete x->out_tread_control;
 	delete x->server_control;
 	delete x->python_import_control;
+
+	for (int i = 0; i < 4; i++) { delete x->conn_pool[i]; x->conn_pool[i] = nullptr; }
+	delete x->conn_pool_mutex;
+	delete x->control_conn; x->control_conn = nullptr;
+	delete x->control_conn_mutex;
 
 	post("Memory freed. Object cleanup complete.");
 
@@ -523,15 +563,20 @@ void multi_track_jit_matrix(t_multi_track* x, t_symbol* s, long argc, t_atom* ar
 	// Create threads for sending only non-predicted instruments
 	std::thread* threads[4] = { nullptr };
 
+	int num_active = 0;
+	for (int i = 0; i < 4; i++) {
+		if (x->read_flag[i] == 1) num_active++;
+	}
+	int num_samples_per_plane = info.dim[0] * info.dim[1];
+	int num_chunks_per_plane = (num_samples_per_plane + (int)x->package_size - 1) / (int)x->package_size;
+	int total_expected_chunks = num_active * num_chunks_per_plane;
+
 	for (int i = 0; i < 4; i++) {
 		if (x->read_flag[i] == 1) {  // Send only if read falag is 1
-			threads[i] = new std::thread(send_matrix_plane, matrix_data, i, info.dim[0], info.dim[1],
-				info.dimstride[0], info.dimstride[1], x->server_ip, x->PORT_SENDER,
-				plane_tags[i], x->package_size);
+			threads[i] = new std::thread(send_matrix_plane, x, matrix_data, i, info.dim[0], info.dim[1],
+				info.dimstride[0], info.dimstride[1],
+				plane_tags[i], x->package_size, total_expected_chunks);
 		}
-		//else {
-		//	post("Skipping %s (predicted by model)", plane_tags[i]);
-		//}
 	}
 
 	// Join threads
@@ -561,8 +606,7 @@ void multi_track_jit_matrix(t_multi_track* x, t_symbol* s, long argc, t_atom* ar
 	*x->guitar_index = 0;
 	*x->piano_index = 0;
 
-	// Send triger to start prediction process
-	multi_track_OSC_time_to_predict_sender(x);
+	// Python self-triggers prediction when it has received all expected chunks
 }
 
 
@@ -575,6 +619,15 @@ void multi_track_jit_matrix(t_multi_track* x, t_symbol* s, long argc, t_atom* ar
 /**********************************************************************/
 /**********************************************************************/
 
+static void send_control(t_multi_track* x, const char* data, int size) {
+	std::lock_guard<std::mutex> lock(*x->control_conn_mutex);
+	if (!x->control_conn || !x->control_conn->is_connected()) {
+		delete x->control_conn;
+		x->control_conn = new TcpTransmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+	}
+	x->control_conn->Send(data, size);
+}
+
 void multi_track_set_packet_size(t_multi_track* x, long new_size) {
 	if (new_size < 128 || new_size > 16384) {  // Limit range for safety
 		post("Invalid packet size. Choose between 128 and 16384 bytes.");
@@ -584,17 +637,10 @@ void multi_track_set_packet_size(t_multi_track* x, long new_size) {
 	x->package_size = new_size;
 	post("Packet size set to %d", x->package_size);
 
-	// Send updated package size (chunk size) to Python
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
-	p << osc::BeginMessage("/update_package_size")
-		<< x->package_size  // Send the new package size to Python
-		<< osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	p << osc::BeginMessage("/update_package_size") << x->package_size << osc::EndMessage;
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /update_package_size with size %d", x->package_size);
 }
 
@@ -607,17 +653,10 @@ void multi_track_set_percentage(t_multi_track* x, double new_percentage) {
 	x->percentage = new_percentage;
 	post("Percentage set to %f", x->percentage);
 
-	// Send updated percentage to Python server
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
-	p << osc::BeginMessage("/update_percentage")
-		<< x->percentage  // Send the new percentage to Python
-		<< osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	p << osc::BeginMessage("/update_percentage") << x->percentage << osc::EndMessage;
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /update_percentage with value %f", x->percentage);
 }
 
@@ -631,17 +670,10 @@ void multi_track_set_pr_win_mul(t_multi_track* x, double new_pr_win_mul) {
 	x->pr_win_mul = new_pr_win_mul;
 	post("Percentage set to %f", x->pr_win_mul);
 
-	// Send updated percentage to Python server
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
-	p << osc::BeginMessage("/pr_win_mul")
-		<< x->pr_win_mul  // Send the new percentage to Python
-		<< osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	p << osc::BeginMessage("/pr_win_mul") << x->pr_win_mul << osc::EndMessage;
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /pr_win_mul with value %f", x->pr_win_mul);
 }
 
@@ -652,7 +684,6 @@ void multi_track_test_packet(t_multi_track* x) {
 		post("Starting packet test with size %d (floats)", x->package_size);
 	}
 
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 	char osc_buffer[OUTPUT_BUFFER_SIZE];
 
 	// High-resolution timers
@@ -672,8 +703,7 @@ void multi_track_test_packet(t_multi_track* x) {
 
 	auto t1 = std::chrono::high_resolution_clock::now();
 
-	// Send
-	transmitSocket.Send(p.Data(), p.Size());
+	send_control(x, p.Data(), p.Size());
 
 	auto t2 = std::chrono::high_resolution_clock::now();
 
@@ -760,17 +790,13 @@ void multi_track_set_read_instruments(t_multi_track* x, t_symbol* s, long argc, 
 
 void multi_track_send_predict_instruments(t_multi_track* x) {
 
-	// Send updated selection to Python server
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
 	p << osc::BeginMessage("/predict_instruments")
 		<< x->predict_flags[0] << x->predict_flags[1]
 		<< x->predict_flags[2] << x->predict_flags[3]
 		<< osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /predict_instruments");
 }
 
@@ -778,26 +804,18 @@ void multi_track_send_predict_instruments(t_multi_track* x) {
 
 
 void multi_track_send_print(t_multi_track* x) {
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
 	p << osc::BeginMessage("/print") << true << osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /print 1");
 }
 
 void multi_track_send_reset(t_multi_track* x) {
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[256];
 	osc::OutboundPacketStream p(buffer, 256);
-
 	p << osc::BeginMessage("/reset") << 1 << osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	send_control(x, p.Data(), p.Size());
 	post("Sent OSC message: /reset");
 
 	// Reset all instrument indices
@@ -1342,6 +1360,14 @@ void multi_track_server(t_multi_track* x, long command) {
 		else {
 			post("No active server process found.");
 		}
+		{
+			std::lock_guard<std::mutex> lock(*x->conn_pool_mutex);
+			for (int i = 0; i < 4; i++) { delete x->conn_pool[i]; x->conn_pool[i] = nullptr; }
+		}
+		{
+			std::lock_guard<std::mutex> lock(*x->control_conn_mutex);
+			delete x->control_conn; x->control_conn = nullptr;
+		}
 #else
 		post("Stopping the server...");
 		// 1. Kill server process by port (reliable regardless of process hierarchy)
@@ -1366,6 +1392,15 @@ void multi_track_server(t_multi_track* x, long command) {
 		x->server_pgid = 0;
 		post("Server stopped.");
 #endif
+		// Reset connection pool so stale connections are not reused after restart
+		{
+			std::lock_guard<std::mutex> lock(*x->conn_pool_mutex);
+			for (int i = 0; i < 4; i++) { delete x->conn_pool[i]; x->conn_pool[i] = nullptr; }
+		}
+		{
+			std::lock_guard<std::mutex> lock(*x->control_conn_mutex);
+			delete x->control_conn; x->control_conn = nullptr;
+		}
 	}
 }
 
@@ -1400,38 +1435,37 @@ void timestamp()     /*********this is used to track timing of data flow *****/
 
 /* function for data sending */
 
-void send_matrix_plane(char* matrix_data, int plane, long dim0, long dim1, long dimstride0, long dimstride1, const char* address, int port, const char* tag, long package_size) {
-	TcpTransmitSocket transmitSocket(IpEndpointName(address, port));
-	char osc_buffer[OUTPUT_BUFFER_SIZE];
-
-	// Divide the plane into chunks
-	//int package_size = package_size; // 10240; // Maximum floats per OSC message
-	int num_samples = dim0 * dim1; // Total samples in the plane
-	int num_chunks = (num_samples + package_size - 1) / package_size; // Round up
+void send_matrix_plane(t_multi_track* x, char* matrix_data, int plane, long dim0, long dim1, long dimstride0, long dimstride1, const char* tag, long package_size, int total_expected_chunks) {
+	int num_samples = dim0 * dim1;
+	int num_chunks = (num_samples + package_size - 1) / package_size;
 
 	for (int chunk = 0; chunk < num_chunks; chunk++) {
+		char osc_buffer[OUTPUT_BUFFER_SIZE];
 		osc::OutboundPacketStream p(osc_buffer, OUTPUT_BUFFER_SIZE);
-		p.Clear();
 		p << osc::BeginMessage(tag);
 
 		int start_index = chunk * package_size;
 		p << start_index;
+		p << total_expected_chunks;
 		int end_index = (start_index + package_size < num_samples) ? start_index + package_size : num_samples;
 
 		for (int i = start_index; i < end_index; i++) {
 			int row = i / dim1;
 			int col = i % dim1;
 			int matrix_index = row * dimstride0 / sizeof(float) + col * dimstride1 / sizeof(float) + plane;
-
-			float value = ((float*)matrix_data)[matrix_index];
-			p << value;
+			p << ((float*)matrix_data)[matrix_index];
 		}
 
 		p << osc::EndMessage;
-		transmitSocket.Send(p.Data(), p.Size());
 
-		// Optional: Add a small delay to avoid overwhelming the receiver
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		// One persistent connection per plane. This plane thread has exclusive
+		// access to conn_pool[plane], so no locking needed on Send().
+		if (!x->conn_pool[plane] || !x->conn_pool[plane]->is_connected()) {
+			std::lock_guard<std::mutex> lock(*x->conn_pool_mutex);
+			delete x->conn_pool[plane];
+			x->conn_pool[plane] = new TcpTransmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
+		}
+		x->conn_pool[plane]->Send(p.Data(), p.Size());
 	}
 }
 
@@ -1440,51 +1474,26 @@ void send_matrix_plane(char* matrix_data, int plane, long dim0, long dim1, long 
 /* function to send network file name */
 void multi_track_OSC_load_model(t_multi_track* x)
 {
-
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[4096];
-
 	osc::OutboundPacketStream p(buffer, 4096);
-
 	p << osc::BeginMessage("/load_model") << osc::EndMessage;
-
-
-	transmitSocket.Send(p.Data(), p.Size());
-
+	send_control(x, p.Data(), p.Size());
 }
 
-/* send signal that server needs to predict now */
+/* send signal that server needs to predict now (manual fallback) */
 void multi_track_OSC_time_to_predict_sender(t_multi_track* x)
 {
-	int one = 1;
-
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-	
 	char buffer[32];
-
 	osc::OutboundPacketStream p(buffer, 32);
-
-	p << osc::BeginMessage("/predict") << one << osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
-
+	p << osc::BeginMessage("/predict") << 1 << osc::EndMessage;
+	send_control(x, p.Data(), p.Size());
 }
 
-// Add a function to send acknowledgment
 void send_acknowledgment(t_multi_track* x) {
-	// Send the acknowledgment message to the Python server
-	int one = 1;
-
-	TcpTransmitSocket transmitSocket(IpEndpointName(x->server_ip, x->PORT_SENDER));
-
 	char buffer[32];
-
 	osc::OutboundPacketStream p(buffer, 32);
-
-	p << osc::BeginMessage("/ack") << one << osc::EndMessage;
-
-	transmitSocket.Send(p.Data(), p.Size());
+	p << osc::BeginMessage("/ack") << 1 << osc::EndMessage;
+	send_control(x, p.Data(), p.Size());
 }
 
 
