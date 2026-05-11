@@ -919,7 +919,7 @@
 					"patching_rect" : [ 437.0, 46.0, 182.0, 24.0 ],
 					"presentation" : 1,
 					"presentation_rect" : [ 136.610626220703125, 28.892375946044922, 171.769882202148438, 25.0 ],
-					"text" : " karchkhadze@reach1.ircam.fr",
+					"text" : " user@hostname",
 					"textcolor" : [ 1.0, 1.0, 1.0, 1.0 ],
 					"varname" : "host"
 				}

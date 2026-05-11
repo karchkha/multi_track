@@ -1,5 +1,5 @@
 {
-	"author" : "Tornike Karchkhadze",
+	"author" : "Anonymous Author",
 	"description" : "Multi-track music arrangement generation Latent Diffusion Moldel (LDM) via a Python server",
 	"displayname" : "multi_track",
 	"max_version_min" : "8.0.0",

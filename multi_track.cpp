@@ -31,7 +31,7 @@
 	Inlets:  1 (message)
 	Outlets: 1 bang — fires when prediction has been written to buffer
 
-	Tornike Karchkhadze, tkarchkhadze@ucsd.edu
+	Anonymous Author
 */
 
 

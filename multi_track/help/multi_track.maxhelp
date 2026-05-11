@@ -341,7 +341,7 @@
 									"clearcolor" : [ 0.811765, 0.372549, 0.372549, 1.0 ]
 								}
 ,
-								"parentstyle" : "karchkha1",
+								"parentstyle" : "mainstyle1",
 								"multi" : 0
 							}
 , 							{
@@ -378,11 +378,11 @@
 									"fontsize" : [ 12.0 ]
 								}
 ,
-								"parentstyle" : "karchkha1",
+								"parentstyle" : "mainstyle1",
 								"multi" : 0
 							}
 , 							{
-								"name" : "karchkha1",
+								"name" : "mainstyle1",
 								"default" : 								{
 									"fontsize" : [ 20.0 ],
 									"clearcolor" : [ 0.278431, 0.921569, 0.639216, 0.0 ],
@@ -1704,7 +1704,7 @@
 					"presentation" : 1,
 					"presentation_linecount" : 3,
 					"presentation_rect" : [ 478.1849365234375, 528.56292724609375, 502.79571533203125, 48.076004028320313 ],
-					"text" : "set_command \"ssh -p 22 -t karchkhadze@reach1.ircam.fr \\\"bash -ic 'cd musical-accompaniment-ldm && export CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\""
+					"text" : "set_command \"ssh -p 22 -t user@hostname \\\"bash -ic 'cd musical-accompaniment-ldm && export CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\""
 				}
 
 			}
@@ -3574,7 +3574,7 @@
 									"clearcolor" : [ 0.811765, 0.372549, 0.372549, 1.0 ]
 								}
 ,
-								"parentstyle" : "karchkha1",
+								"parentstyle" : "mainstyle1",
 								"multi" : 0
 							}
 , 							{
@@ -3611,11 +3611,11 @@
 									"fontsize" : [ 12.0 ]
 								}
 ,
-								"parentstyle" : "karchkha1",
+								"parentstyle" : "mainstyle1",
 								"multi" : 0
 							}
 , 							{
-								"name" : "karchkha1",
+								"name" : "mainstyle1",
 								"default" : 								{
 									"fontsize" : [ 20.0 ],
 									"clearcolor" : [ 0.278431, 0.921569, 0.639216, 0.0 ],
@@ -6588,7 +6588,7 @@
 					"presentation" : 1,
 					"presentation_linecount" : 43,
 					"presentation_rect" : [ 0.0, 467.0, 466.0, 596.0 ],
-					"text" : "SERVER COMMAND\n\n\nThe server_config panel above auto-generates a set_command for common setups. To monitor the output, check the Max console — a new command is generated whenever any setting changes. If your setup differs, write your command in the custom command textedit and click bang. You need SSH access to the server with a public key (no password), and open (and if nessesary forwarded) UDP ports for sending and receiving.\n\nEXAMPLE COMMANDS:\n\n=================================================================\n\nLocal Mac:\nset_command \"zsh -ic \\\"cd ~/musical-accompaniment-ldm && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 127.0.0.1\\\"\"\n\nLocal Windows:\nset_command \"cmd.exe /K \\\"cd USERPROFILE\\\\musical-accompaniment-ldm && set CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 127.0.0.1\\\"\"\n\n=================================================================\n\nRemote Linux:\nset_command \"ssh -p 1234 -t user@hostname \\\"bash -ic 'cd musical-accompaniment-ldm && export CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\"\n\nRemote Mac:\nset_command \"ssh -p 79 -t user@hostname \\\"zsh -ic 'cd musical-accompaniment-ldm && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\"\n\nRemote Windows:\nset_command \"ssh -t karchkhadze@reach1.ircam.fr \\\"cmd /C 'cd c:user\\musical-accompaniment-ldm && set CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 137.110.36.241'/\"\"\n\n=================================================================\n",
+					"text" : "SERVER COMMAND\n\n\nThe server_config panel above auto-generates a set_command for common setups. To monitor the output, check the Max console — a new command is generated whenever any setting changes. If your setup differs, write your command in the custom command textedit and click bang. You need SSH access to the server with a public key (no password), and open (and if nessesary forwarded) UDP ports for sending and receiving.\n\nEXAMPLE COMMANDS:\n\n=================================================================\n\nLocal Mac:\nset_command \"zsh -ic \\\"cd ~/musical-accompaniment-ldm && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 127.0.0.1\\\"\"\n\nLocal Windows:\nset_command \"cmd.exe /K \\\"cd USERPROFILE\\\\musical-accompaniment-ldm && set CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 127.0.0.1\\\"\"\n\n=================================================================\n\nRemote Linux:\nset_command \"ssh -p 1234 -t user@hostname \\\"bash -ic 'cd musical-accompaniment-ldm && export CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\"\n\nRemote Mac:\nset_command \"ssh -p 79 -t user@hostname \\\"zsh -ic 'cd musical-accompaniment-ldm && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000'\\\"\"\n\nRemote Windows:\nset_command \"ssh -t user@hostname \\\"cmd /C 'cd c:user\\musical-accompaniment-ldm && set CUDA_VISIBLE_DEVICES=0 && conda run --no-capture-output -n ctm_gen python server.py --serverport 7000 --clientport 8000 --client_ip 137.110.36.241'/\"\"\n\n=================================================================\n",
 					"textcolor" : [ 0.996078431606293, 0.996078431606293, 0.996078431606293, 1.0 ]
 				}
 
@@ -9827,7 +9827,7 @@
 					"clearcolor" : [ 0.811765, 0.372549, 0.372549, 1.0 ]
 				}
 ,
-				"parentstyle" : "karchkha1",
+				"parentstyle" : "mainstyle1",
 				"multi" : 0
 			}
 , 			{
@@ -9864,11 +9864,11 @@
 					"fontsize" : [ 12.0 ]
 				}
 ,
-				"parentstyle" : "karchkha1",
+				"parentstyle" : "mainstyle1",
 				"multi" : 0
 			}
 , 			{
-				"name" : "karchkha1",
+				"name" : "mainstyle1",
 				"default" : 				{
 					"fontsize" : [ 20.0 ],
 					"clearcolor" : [ 0.278431, 0.921569, 0.639216, 0.0 ],
