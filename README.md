@@ -39,7 +39,7 @@ echo "net.inet.udp.maxdgram=65535" | sudo tee -a /etc/sysctl.conf
 Open `multi_track.maxhelp` in Max for a full interactive guide. The help patch demonstrates all messages, configuration options, and typical usage patterns.
 
 The Python server component of this project is available here:
-https://github.com/[anonymous]/musical-accompaniment-ldm
+<!-- https://github.com/[anonymous]/musical-accompaniment-ldm -->
 
 ### OSC Communication
 
